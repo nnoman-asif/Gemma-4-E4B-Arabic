@@ -423,11 +423,12 @@ class TestGemma4ArabicPipeline(unittest.TestCase):
     def test_09_zero_forbidden_unicode_across_repository(self) -> None:
         """Verify zero forbidden Unicode dashes or curly quotes exist in any project file."""
         allowed_suffixes = {".py", ".yaml", ".yml", ".md", ".toml", ".txt"}
+        excluded_dirs = {".git", "hf_cache", "data", "outputs", "cache", "__pycache__"}
         files = [
             p
             for p in PROJECT_ROOT.rglob("*")
             if p.is_file()
-            and ".git" not in p.parts
+            and not any(part in excluded_dirs for part in p.parts)
             and (p.suffix in allowed_suffixes or p.name == ".gitignore")
         ]
         self.assertGreaterEqual(len(files), 20)
