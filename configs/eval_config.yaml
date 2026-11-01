@@ -1,5 +1,6 @@
-# Standardized Before-and-After Benchmark Evaluation Configuration
-# Covers the 6 primary Arabic/Saudi benchmarks and 4 English/Math/Code zero-forgetting anchors.
+# Standardized Before-and-After Benchmark Evaluation Configuration for the Gemma 4 Arabic Family
+# Covers 7 primary Arabic/Saudi benchmarks (6 OALL v2 + MGSM-Ar CoT), 4 zero-forgetting anchors,
+# and Iso-Active Latency/Throughput/VRAM profiling across Gemma-4-E4B-Arabic and Gemma-4-26B-A4B-Arabic.
 
 evaluation:
   base_model_id: "unsloth/gemma-4-E4B-it-unsloth-bnb-4bit"
@@ -8,10 +9,30 @@ evaluation:
   merged_checkpoint_dir: "outputs/merged_gemma4_e4b_arabic"
   output_report_path: "outputs/eval_reports/benchmark_comparison.md"
   output_json_path: "outputs/eval_reports/benchmark_results.json"
+  family_comparison_json_path: "outputs/eval_reports/family_benchmark_comparison.json"
   batch_size: 4
   max_seq_length: 2048
   dtype: "bfloat16"
   device: "cuda:0"
+
+models:
+  e4b:
+    label: "Gemma-4-E4B-Arabic-It"
+    architecture: "Dense (8.0B Total / 4.5B Active)"
+    base_model_id: "google/gemma-4-E4B-it"
+    unsloth_model_id: "unsloth/gemma-4-E4B-it-unsloth-bnb-4bit"
+    merged_checkpoint_dir: "outputs/merged_gemma4_e4b_arabic"
+    hf_repo_id: "noman-asif/Gemma-4-E4B-Arabic-It"
+    device: "cuda:0"
+
+  26b_a4b:
+    label: "Gemma-4-26B-A4B-Arabic-It"
+    architecture: "MoE 128 Experts (26.0B Total / 3.8B Active)"
+    base_model_id: "google/gemma-4-26B-A4B-it"
+    unsloth_model_id: "unsloth/gemma-4-26B-A4B-it"
+    merged_checkpoint_dir: "outputs/merged_gemma4_26b_a4b_arabic"
+    hf_repo_id: "noman-asif/Gemma-4-26B-A4B-Arabic-It"
+    device: "cuda:1"
 
 retention_gate:
   enforce_zero_forgetting: true
@@ -34,6 +55,8 @@ arabic_benchmarks:
     num_fewshot: 0
     baseline_score: 55.2
     target_score: 64.5
+    baseline_score_26b: 65.8
+    target_score_26b: 75.4
     description: "Native 40-subject curriculum across KSA, Jordan, Egypt, and UAE (STEM, Islamic Studies, Arab Law, History, Civics)"
 
   MadinahQA:
@@ -43,6 +66,8 @@ arabic_benchmarks:
     num_fewshot: 0
     baseline_score: 44.1
     target_score: 64.0
+    baseline_score_26b: 58.4
+    target_score_26b: 74.2
     description: "Classical and MSA Arabic language and grammar (Nahw, Sarf, Irab, Balagha)"
 
   AlGhafa:
@@ -52,6 +77,8 @@ arabic_benchmarks:
     num_fewshot: 0
     baseline_score: 54.2
     target_score: 68.0
+    baseline_score_26b: 64.0
+    target_score_26b: 76.8
     description: "Native MSA and Saudi/Gulf/Egyptian dialect reading comprehension, grounded QA, and sentiment"
 
   ACVA:
@@ -61,6 +88,8 @@ arabic_benchmarks:
     num_fewshot: 0
     baseline_score: 72.0
     target_score: 82.0
+    baseline_score_26b: 78.5
+    target_score_26b: 88.2
     description: "Arabic and Islamic cultural values alignment across 58 native subtasks"
 
   EXAMS-AR:
@@ -70,6 +99,8 @@ arabic_benchmarks:
     num_fewshot: 0
     baseline_score: 42.8
     target_score: 54.0
+    baseline_score_26b: 54.6
+    target_score_26b: 66.5
     description: "High-school subject examinations in Arabic across science and humanities"
 
   AraTrust:
@@ -79,7 +110,20 @@ arabic_benchmarks:
     num_fewshot: 0
     baseline_score: 78.3
     target_score: 86.0
+    baseline_score_26b: 83.5
+    target_score_26b: 91.4
     description: "Arabic safety, truthfulness, and trustworthiness evaluation"
+
+  MGSM-Ar:
+    lm_eval_task: "mgsm_native_cot_ar"
+    lighteval_task: "community|mgsm_ar|5"
+    metric: "exact_match"
+    num_fewshot: 5
+    baseline_score: 51.6
+    target_score: 66.8
+    baseline_score_26b: 68.4
+    target_score_26b: 81.2
+    description: "Generative Arabic multi-step mathematical Chain-of-Thought (<|think|>) reasoning benchmark"
 
 retention_anchors:
   MMLU-Pro:
@@ -88,6 +132,7 @@ retention_anchors:
     metric: "acc"
     num_fewshot: 5
     baseline_score: 69.4
+    baseline_score_26b: 78.2
     max_regression_pct: 0.20
     min_acceptable_score: 69.2
 
@@ -97,6 +142,7 @@ retention_anchors:
     metric: "exact_match,strict-match"
     num_fewshot: 5
     baseline_score: 84.0
+    baseline_score_26b: 91.4
     max_regression_pct: 0.20
     min_acceptable_score: 83.8
 
@@ -106,6 +152,7 @@ retention_anchors:
     metric: "pass@1"
     num_fewshot: 0
     baseline_score: 52.0
+    baseline_score_26b: 67.1
     max_regression_pct: 0.20
     min_acceptable_score: 51.8
 
@@ -115,5 +162,39 @@ retention_anchors:
     metric: "acc_norm"
     num_fewshot: 25
     baseline_score: 76.6
+    baseline_score_26b: 85.4
     max_regression_pct: 0.20
     min_acceptable_score: 76.4
+
+latency_benchmark:
+  context_lengths:
+    - 512
+    - 2048
+    - 4096
+  max_new_tokens: 128
+  warmup_runs: 2
+  timed_runs: 5
+  output_json_path: "outputs/eval_reports/latency_vram_report.json"
+
+vllm_concurrency_benchmark:
+  hardware_target: "Single NVIDIA A100-SXM4-80GB (80.0 GB HBM2e, vLLM PagedAttention + Continuous Batching)"
+  gpu_vram_limit_gb: 80.0
+  gpu_memory_utilization: 0.90
+  dtype: "bfloat16"
+  prompt_tokens: 512
+  max_new_tokens: 256
+  concurrency_users:
+    - 1
+    - 10
+    - 30
+    - 40
+    - 50
+  output_json_path: "outputs/eval_reports/vllm_concurrency_profile.json"
+  output_markdown_path: "outputs/eval_reports/vllm_concurrency_report.md"
+
+plotting:
+  output_dir: "assets/plots"
+  dpi: 300
+  formats:
+    - "png"
+    - "svg"

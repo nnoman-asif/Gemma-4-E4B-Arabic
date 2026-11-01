@@ -16,6 +16,7 @@ Verifies:
 import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from typing import Any, Dict, List
 
@@ -27,7 +28,22 @@ PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.run_benchmarks import evaluate_retention_gate, generate_markdown_report
+from scripts.benchmark_latency_and_plots import (
+    build_reference_latency_profile,
+    generate_all_family_plots,
+)
+from scripts.benchmark_vllm_concurrency import (
+    build_reference_vllm_concurrency_profile,
+    generate_vllm_concurrency_plot,
+    render_vllm_markdown_report,
+)
+from scripts.package_local_sync import build_local_sync_bundle
+from scripts.publish_to_hub import main as publish_to_hub_main
+from scripts.run_benchmarks import (
+    evaluate_retention_gate,
+    generate_markdown_report,
+    parse_lm_eval_results_json,
+)
 from src.chat_template import (
     format_gemma4_chat,
     format_thinking_response,
@@ -36,6 +52,10 @@ from src.chat_template import (
 from src.constants import (
     ALL_9_DATASET_REPOS,
     ARABIC_DIALECT_DPO_REPO,
+    DEFAULT_26B_MODEL_REPO,
+    DEFAULT_DPO_DATASET_REPO,
+    DEFAULT_E4B_MODEL_REPO,
+    DEFAULT_SFT_DATASET_REPO,
     DEFAULT_TIES_DENSITY,
     DEFAULT_TIES_LAMBDA,
     DPO_TRUST_REGION_ALPHA,
@@ -44,6 +64,7 @@ from src.constants import (
     LORA_ALPHA,
     LORA_RANK,
     LORA_TARGET_MODULES,
+    PRIMARY_MODEL_ID_26B,
     THINK_TOKEN,
 )
 from src.data_normalizer import (
@@ -110,7 +131,8 @@ class TestGemma4ArabicPipeline(unittest.TestCase):
         self.assertEqual(dpo_cfg["training"]["learning_rate"], 5.0e-7)
         self.assertEqual(dpo_cfg["dpo"]["max_length"], 1536)
 
-        self.assertEqual(len(eval_cfg["arabic_benchmarks"]), 6)
+        self.assertEqual(len(eval_cfg["arabic_benchmarks"]), 7)
+        self.assertIn("MGSM-Ar", eval_cfg["arabic_benchmarks"])
         self.assertEqual(len(eval_cfg["retention_anchors"]), 4)
 
     def test_02_gemma4_chat_template_thinking_tokens(self) -> None:
@@ -447,6 +469,136 @@ class TestGemma4ArabicPipeline(unittest.TestCase):
             if c in p.read_text(encoding="utf-8")
         ]
         self.assertEqual(hits, [], f"Forbidden Unicode characters detected: {hits}")
+
+    def test_10_dual_model_a100_configs_and_router_freeze(self) -> None:
+        """Verify A100 80 GB configs for E4B and 26B-A4B, MoE router freeze, and lm_eval JSON parser."""
+        for fname in (
+            "sft_e4b_a100.yaml",
+            "dpo_e4b_a100.yaml",
+            "sft_26b_a4b_a100.yaml",
+            "dpo_26b_a4b_a100.yaml",
+        ):
+            cfg_path = PROJECT_ROOT / "configs" / fname
+            self.assertTrue(cfg_path.exists(), f"Missing config: {cfg_path}")
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+            self.assertFalse(cfg["vram_optimization"]["offload_ple_to_cpu"])
+            self.assertFalse(cfg["vram_optimization"]["offload_multimodal_towers_to_cpu"])
+            self.assertEqual(cfg["training"]["optim"], "adamw_bnb_8bit")
+
+        sft_26b = yaml.safe_load(
+            (PROJECT_ROOT / "configs" / "sft_26b_a4b_a100.yaml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(sft_26b["model"]["base_model_id"], PRIMARY_MODEL_ID_26B)
+        self.assertEqual(sft_26b["datasets"]["total_target_samples"], 120000)
+        self.assertTrue(sft_26b["vram_optimization"]["freeze_moe_router"])
+
+        class _MockMoEBlock(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.router = nn.Linear(16, 8, bias=False)
+                self.gate_proj = nn.Linear(16, 32, bias=False)
+
+        moe_block = _MockMoEBlock()
+        freeze_embeddings_and_towers(moe_block, freeze_moe_router=True)
+        self.assertFalse(moe_block.router.weight.requires_grad)
+        self.assertTrue(moe_block.gate_proj.weight.requires_grad)
+
+        # Verify lm_eval JSON parser converts [0, 1] fraction to [0, 100] percentage
+        sample_lm_eval = {
+            "results": {
+                "arabicmmlu": {
+                    "acc_norm,none": 0.645,
+                    "acc_norm_stderr,none": 0.012,
+                }
+            }
+        }
+        parsed_score = parse_lm_eval_results_json(
+            sample_lm_eval, task_name="arabicmmlu", metric_hint="acc_norm"
+        )
+        self.assertAlmostEqual(parsed_score, 64.50, places=2)
+
+    def test_11_plots_and_hub_publisher_dry_run(self) -> None:
+        """Verify all 4 comparison plots (PNG + SVG) and Hugging Face Hub cards generation."""
+        eval_cfg = yaml.safe_load(
+            (PROJECT_ROOT / "configs" / "eval_config.yaml").read_text(encoding="utf-8")
+        )
+        latency_profile = build_reference_latency_profile()
+        with tempfile.TemporaryDirectory(prefix="gemma4_plots_test_") as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            plots_dir = tmp_path / "plots"
+            cards_dir = tmp_path / "cards"
+
+            generated = generate_all_family_plots(
+                eval_cfg=eval_cfg,
+                latency_profile=latency_profile,
+                output_dir=plots_dir,
+                dpi=120,
+            )
+            self.assertEqual(len(generated), 8)
+            for fpath in generated:
+                p = pathlib.Path(fpath)
+                self.assertTrue(p.exists(), f"Missing generated plot: {p}")
+                self.assertGreater(p.stat().st_size, 50)
+
+            rc = publish_to_hub_main(
+                [
+                    "--hf-namespace",
+                    "noman-asif",
+                    "--cards-output-dir",
+                    str(cards_dir),
+                    "--dry-run",
+                ]
+            )
+            self.assertEqual(rc, 0)
+            self.assertEqual(DEFAULT_SFT_DATASET_REPO, "noman-asif/Arabic-Reasoning-Instruct-120k")
+            self.assertEqual(DEFAULT_DPO_DATASET_REPO, "noman-asif/Arabic-Preference-DPO-20k")
+            self.assertEqual(DEFAULT_E4B_MODEL_REPO, "noman-asif/Gemma-4-E4B-Arabic-It")
+            self.assertEqual(DEFAULT_26B_MODEL_REPO, "noman-asif/Gemma-4-26B-A4B-Arabic-It")
+
+            for card_name in (
+                "Arabic-Reasoning-Instruct-120k_README.md",
+                "Arabic-Preference-DPO-20k_README.md",
+                "Gemma-4-E4B-Arabic-It_README.md",
+                "Gemma-4-26B-A4B-Arabic-It_README.md",
+            ):
+                card_file = cards_dir / card_name
+                self.assertTrue(card_file.exists(), f"Missing Hub card: {card_file}")
+                text = card_file.read_text(encoding="utf-8")
+                self.assertIn("noman-asif", text)
+
+    def test_12_vllm_concurrency_and_local_sync_bundle(self) -> None:
+        """Verify 1-50 user vLLM single-GPU concurrency telemetry, plot, and local sync bundle."""
+        vllm_profile = build_reference_vllm_concurrency_profile()
+        self.assertEqual(vllm_profile["gpu_vram_limit_gb"], 80.0)
+        for user_count in ("1", "10", "30", "40", "50"):
+            e4b_row = vllm_profile["models"]["e4b"]["concurrency_scaling"][user_count]
+            moe_row = vllm_profile["models"]["26b_a4b"]["concurrency_scaling"][user_count]
+            self.assertLess(e4b_row["vram_used_gb"], 80.0)
+            self.assertLess(moe_row["vram_used_gb"], 80.0)
+            self.assertGreater(e4b_row["total_system_tokens_per_sec"], 100.0)
+            self.assertGreater(moe_row["total_system_tokens_per_sec"], 100.0)
+
+        md_report = render_vllm_markdown_report(vllm_profile)
+        self.assertIn("30 Users", md_report)
+        self.assertIn("50 Users", md_report)
+
+        with tempfile.TemporaryDirectory(prefix="gemma4_vllm_sync_test_") as tmp_dir:
+            tmp_path = pathlib.Path(tmp_dir)
+            plots = generate_vllm_concurrency_plot(vllm_profile, output_dir=tmp_path, dpi=120)
+            self.assertEqual(len(plots), 2)
+            for p_str in plots:
+                self.assertTrue(pathlib.Path(p_str).exists())
+
+            bundle_file = tmp_path / "sync_bundle.tar.gz"
+            manifest_file = tmp_path / "sync_manifest.json"
+            manifest = build_local_sync_bundle(
+                project_root=PROJECT_ROOT,
+                bundle_path=bundle_file,
+                manifest_path=manifest_file,
+            )
+            self.assertTrue(bundle_file.exists())
+            self.assertTrue(manifest_file.exists())
+            self.assertGreaterEqual(manifest["files_count"], 10)
 
 
 if __name__ == "__main__":
